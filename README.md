@@ -163,10 +163,23 @@ NeuroSentinel analyzes speech using **9 distinct biomarkers** across acoustic, p
 
 ### Speech Recognition Model
 - **Model**: Vosk (Kaldi-based ASR)
-- **Version**: vosk-model-small-en-us-0.15
+- **Version**: vosk-model-small-en-us-0.15 (English), vosk-model-small-hi-0.22 (Hindi)
 - **Purpose**: Speech-to-text transcription for linguistic feature extraction
-- **Language**: English (US)
-- **Size**: ~40MB
+- **Language**: English (US) primary; Hindi supported via cross-lingual transfer (see below)
+- **Size**: ~40MB (EN) + ~45MB (HI)
+
+### Hindi Language Support (Experimental)
+
+Hindi is supported by reusing the English-trained Random Forest classifier rather than training a separate Hindi model, since no labeled Hindi cognitive-decline speech dataset exists publicly or was otherwise accessible for this project. This works because:
+
+- The 4 pure-acoustic biomarkers (MFCC mean, MFCC delta, spectral centroid, pitch variance) are computed directly from the waveform and are language-independent.
+- The 5 ASR-derived biomarkers (pause rate, vocabulary richness, word count, speech rate, initial latency) depend on Hindi transcription (via `vosk-model-small-hi-0.22`) and can shift for reasons unrelated to cognitive status (e.g. Hindi's word segmentation differs from English's).
+
+To correct for that, `src/calibrate_hindi.py` computes the mean of those 5 features across a handful of healthy Hindi recordings (`data/healthy_hindi/*.wav`) and offsets them to match the English healthy baseline before scoring. **Limitation**: since no Hindi recordings with diagnosed/observed cognitive decline were available to validate against, this calibration is checked only against healthy speakers — it has *not* been validated on Hindi speech reflecting actual cognitive decline. Treat Hindi results as experimental; the UI displays this caveat whenever Hindi mode is used.
+
+**Setup**: download and extract [`vosk-model-small-hi-0.22`](https://alphacephei.com/vosk/models) into `models/vosk-model-small-hi-0.22/`. Calibration is optional — without it, Hindi mode still works using raw cross-lingual transfer; run `python calibrate_hindi.py` (from `src/`) after adding a few recordings to `data/healthy_hindi/` to enable it.
+
+The calibration currently shipped (`models/hindi_calibration.json`) was generated from 15 clips of the OpenSLR SLR103 Hindi ASR corpus (general adult speech, not age/health-screened controls) — see `data/healthy_hindi/SOURCE.md` for provenance and its limitations. On that sample, 14/15 clips classified as "Healthy" both with and without calibration, so on this dataset it mainly served as a validation check rather than a large correction. Swap in real Hindi speaker recordings and re-run the script if you get access to any.
 
 ### Feature Extraction Libraries
 - **Librosa**: Acoustic and prosodic feature extraction (MFCCs, spectral centroid, pitch tracking)
@@ -383,7 +396,7 @@ Each assessment generates a clinical report containing:
 
 - **Not a diagnostic tool**: For research and screening purposes only
 - **Requires clinical validation**: Predictions should be confirmed by healthcare professionals
-- **Language limitation**: Currently supports English (US) only
+- **Language limitation**: Native support for English (US); Hindi support is experimental cross-lingual transfer, validated only against healthy speakers (see Hindi Language Support above)
 - **Audio quality**: Requires clear recordings in quiet environments
 - **Sample size**: Performance depends on training data quality
 

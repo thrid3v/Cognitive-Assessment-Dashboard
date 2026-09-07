@@ -36,3 +36,8 @@ responses.txt
 # data/mild/*.wav
 # data/moderate/*.wav
 # data/severe/*.wav
+
+# Hindi calibration source audio - third-party dataset (OpenSLR/Microsoft
+# Research Open Data, see data/healthy_hindi/SOURCE.md), not ours to redistribute.
+# Only the derived aggregate statistics (models/hindi_calibration.json) are committed.
+data/healthy_hindi/*.wav

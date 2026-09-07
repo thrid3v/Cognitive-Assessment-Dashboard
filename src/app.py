@@ -10,7 +10,7 @@ import random # Imported at top for cleaner code
 
 # --- IMPORT BACKEND ---
 try:
-    from predictor import get_prediction, generate_clinical_summary, calculate_current_accuracy
+    from predictor import get_prediction, generate_clinical_summary, calculate_current_accuracy, is_hindi_available
     from db import init_db, save_result, get_history
 except ImportError as e:
     st.error(f"❌ CRITICAL ERROR: {e}")
@@ -103,7 +103,18 @@ with st.sidebar:
     patient_id = st.text_input("Patient ID / MRN", value=st.session_state.patient_id)
     st.info(f"Active Session: {patient_id}")
     st.markdown("---")
-    
+
+    st.subheader("🌐 Assessment Language")
+    hindi_option = "Hindi (हिन्दी)" if is_hindi_available() else "Hindi (हिन्दी) — model not installed"
+    language_display = st.selectbox("Recording Language", options=["English", hindi_option], index=0)
+    language_code = "hi" if language_display.startswith("Hindi") else "en"
+    if language_code == "hi":
+        st.caption(
+            "⚠️ Hindi analysis uses cross-lingual biomarker transfer, calibrated against "
+            "healthy Hindi speech only. Not yet validated against Hindi cognitive-decline cases."
+        )
+    st.markdown("---")
+
     if st.button("Reset Live Trial Stats"):
         st.session_state.session_correct = 0
         st.session_state.session_total = 0
@@ -192,10 +203,16 @@ with tab1:
     # Centered Layout
     st.markdown("<div style='text-align: center; margin-top: 40px;'>", unsafe_allow_html=True)
     st.markdown("<p class='big-red-label'>Tap to Record</p>", unsafe_allow_html=True)
-    
+
+    if language_code == "hi":
+        st.info(
+            "🌐 Recording in Hindi: results use cross-lingual biomarker transfer, calibrated "
+            "against healthy Hindi speech only. Not yet validated against Hindi cognitive-decline cases."
+        )
+
     # Audio Input
-    audio_input = st.audio_input("Record") 
-    
+    audio_input = st.audio_input("Record")
+
     st.markdown("</div>", unsafe_allow_html=True)
 
     if audio_input:
@@ -208,17 +225,17 @@ with tab1:
         with col2:
             if st.button("RUN ANALYSIS 🚀", type="primary", use_container_width=True):
                 with st.spinner("Extracting 9 Neurological Biomarkers..."):
-                    label, confidence, data = get_prediction("temp_input.wav")
-                    
+                    label, confidence, data = get_prediction("temp_input.wav", language=language_code)
+
                     if data is not None:
                         # Pass entire data dict to save_result
-                        save_result(patient_id, label, confidence, data)
-                        
+                        save_result(patient_id, label, confidence, data, language=language_code)
+
                         report_path = generate_pdf(
-                            patient_id, 
+                            patient_id,
                             {
-                                "pause_rate": data['pause_rate'][0], 
-                                "vocab_richness": data['vocab_richness'][0], 
+                                "pause_rate": data['pause_rate'][0],
+                                "vocab_richness": data['vocab_richness'][0],
                                 "word_count": data['word_count'][0],
                                 "speech_rate": data['speech_rate'][0],
                                 "initial_latency": data['initial_latency'][0],
@@ -229,11 +246,12 @@ with tab1:
                             },
                             label
                         )
-                        
+
                         st.session_state['last_result'] = {
                             "label": label, "conf": confidence, "data": data,
                             "summary": generate_clinical_summary(data),
-                            "report_path": report_path
+                            "report_path": report_path,
+                            "language": language_code
                         }
                         st.success("Analysis Complete! switch to 'Biomarker Details' tab to view results.")
                     else:
@@ -248,7 +266,14 @@ with tab2:
     if 'last_result' in st.session_state:
         res = st.session_state['last_result']
         data, label = res['data'], res['label']
-        
+
+        if res.get('language') == 'hi':
+            st.info(
+                "🌐 This assessment used Hindi cross-lingual biomarker transfer, calibrated "
+                "against healthy Hindi speech only. Not yet validated against Hindi "
+                "cognitive-decline cases."
+            )
+
         # --- Result Alert ---
         if "Decline" in label:
             st.error(f"🚨 RESULT: {label.upper()} (Confidence: {res['conf']:.1f}%)")
@@ -380,22 +405,31 @@ with tab3:
         # Sort by ID (chronological)
         h_df = h_df.sort_values(by="id")
         
+        # Mixed-language history is common once Hindi assessments exist for the
+        # same patient; color by language so English/Hindi runs aren't silently
+        # blended into one trend line.
+        has_mixed_language = 'language' in h_df.columns and h_df['language'].nunique() > 1
+        color_kwarg = {'color': 'language'} if has_mixed_language else {}
+
         # Graph 1: Pause Rate Trajectory
-        fig_pause = px.line(h_df, x='timestamp', y='pause_rate', markers=True, title="Pause Rate Trajectory")
+        fig_pause = px.line(h_df, x='timestamp', y='pause_rate', markers=True, title="Pause Rate Trajectory", **color_kwarg)
         fig_pause.add_hline(y=0.40, line_dash="dash", line_color="red", annotation_text="Risk Threshold (>0.4 = Risk)")
-        fig_pause.update_traces(line_color='#E58E8E')
+        if not has_mixed_language:
+            fig_pause.update_traces(line_color='#E58E8E')
         st.plotly_chart(fig_pause, use_container_width=True)
-        
+
         # Graph 2: Word Count Trajectory
-        fig_words = px.line(h_df, x='timestamp', y='word_count', markers=True, title="Word Count Trajectory")
+        fig_words = px.line(h_df, x='timestamp', y='word_count', markers=True, title="Word Count Trajectory", **color_kwarg)
         fig_words.add_hline(y=20, line_dash="dash", line_color="white", annotation_text="Minimum Threshold (>20 = Good)")
-        fig_words.update_traces(line_color='#72CC96')
+        if not has_mixed_language:
+            fig_words.update_traces(line_color='#72CC96')
         st.plotly_chart(fig_words, use_container_width=True)
-        
+
         # Graph 3: Speech Rate Trajectory
-        fig_rate = px.line(h_df, x='timestamp', y='speech_rate', markers=True, title="Speech Rate Trajectory")
+        fig_rate = px.line(h_df, x='timestamp', y='speech_rate', markers=True, title="Speech Rate Trajectory", **color_kwarg)
         fig_rate.add_hline(y=2.0, line_dash="dash", line_color="orange", annotation_text="Minimum Threshold (>2.0 = Good)")
-        fig_rate.update_traces(line_color='#72CCFF')
+        if not has_mixed_language:
+            fig_rate.update_traces(line_color='#72CCFF')
         st.plotly_chart(fig_rate, use_container_width=True)
         st.dataframe(h_df)
     else:

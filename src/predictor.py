@@ -14,31 +14,78 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(CURRENT_DIR)
 
 # Construct absolute paths that work on both Windows and Cloud
-VOSK_PATH = os.path.join(ROOT_DIR, "models", "vosk-model-small-en-us-0.15")
+VOSK_EN_PATH = os.path.join(ROOT_DIR, "models", "vosk-model-small-en-us-0.15")
+VOSK_HI_PATH = os.path.join(ROOT_DIR, "models", "vosk-model-small-hi-0.22")
 MODEL_PATH = os.path.join(ROOT_DIR, "models", "neuro_model.pkl")
 SCALER_PATH = os.path.join(ROOT_DIR, "models", "scaler.pkl")
 DATASET_PATH = os.path.join(ROOT_DIR, "data", "dataset.csv")
+HINDI_CALIBRATION_PATH = os.path.join(ROOT_DIR, "models", "hindi_calibration.json")
+
+# The 5 biomarkers derived from ASR word timestamps (language-dependent).
+# The other 4 (acoustic_texture, mfcc_delta, speech_brightness, emotional_range)
+# come straight from Librosa on the raw waveform and are language-independent,
+# so they're never touched by Hindi calibration.
+LINGUISTIC_FEATURES = ["pause_rate", "vocab_richness", "word_count", "speech_rate", "initial_latency"]
 
 # --- 1. LOAD MODELS ---
 print(f"🔎 Looking for models in: {os.path.join(ROOT_DIR, 'models')}")
 
 clf = None
 scaler = None
-vosk_model = None
+vosk_model_en = None
+vosk_model_hi = None
 
-# Load Vosk
-if not os.path.exists(VOSK_PATH):
+# Load Vosk (English)
+if not os.path.exists(VOSK_EN_PATH):
     # Fallback: Sometimes Cloud puts models in src/models
-    VOSK_PATH = os.path.join(CURRENT_DIR, "models", "vosk-model-small-en-us-0.15")
+    VOSK_EN_PATH = os.path.join(CURRENT_DIR, "models", "vosk-model-small-en-us-0.15")
 
-if os.path.exists(VOSK_PATH):
+if os.path.exists(VOSK_EN_PATH):
     try:
-        vosk_model = Model(VOSK_PATH)
-        print("✅ Vosk Model Loaded!")
+        vosk_model_en = Model(VOSK_EN_PATH)
+        print("✅ Vosk EN Model Loaded!")
     except Exception as e:
-        print(f"❌ Vosk Load Error: {e}")
+        print(f"❌ Vosk EN Load Error: {e}")
 else:
-    print(f"⚠️ CRITICAL: Vosk model not found at {VOSK_PATH}")
+    print(f"⚠️ CRITICAL: Vosk EN model not found at {VOSK_EN_PATH}")
+
+# Load Vosk (Hindi) — optional; Hindi mode degrades gracefully if absent
+if not os.path.exists(VOSK_HI_PATH):
+    VOSK_HI_PATH = os.path.join(CURRENT_DIR, "models", "vosk-model-small-hi-0.22")
+
+if os.path.exists(VOSK_HI_PATH):
+    try:
+        vosk_model_hi = Model(VOSK_HI_PATH)
+        print("✅ Vosk HI Model Loaded!")
+    except Exception as e:
+        print(f"❌ Vosk HI Load Error: {e}")
+else:
+    print(f"ℹ️ Vosk HI model not found at {VOSK_HI_PATH} — Hindi mode unavailable until it is downloaded.")
+
+
+def _get_vosk_model(language="en"):
+    return vosk_model_hi if language == "hi" else vosk_model_en
+
+
+def is_hindi_available():
+    return vosk_model_hi is not None
+
+
+def _load_hindi_calibration():
+    if not os.path.exists(HINDI_CALIBRATION_PATH):
+        print(f"ℹ️ No Hindi calibration found at {HINDI_CALIBRATION_PATH} — using raw cross-lingual transfer.")
+        return {}
+    try:
+        with open(HINDI_CALIBRATION_PATH, 'r') as f:
+            offsets = json.load(f)
+        print(f"✅ Hindi calibration loaded: {offsets}")
+        return offsets
+    except Exception as e:
+        print(f"⚠️ Hindi calibration load error: {e} — falling back to raw cross-lingual transfer.")
+        return {}
+
+
+hindi_calibration = _load_hindi_calibration()
 
 # Load Classifier & Scaler
 try:
@@ -81,7 +128,7 @@ def generate_clinical_summary(features_df):
     except Exception as e:
         return f"Summary generation error: {str(e)}"
 
-def extract_features_from_audio(file_path):
+def extract_features_from_audio(file_path, language="en"):
     """ Extracts all biomarkers using Librosa and Vosk """
     try:
         # 1. ACOUSTIC ANALYSIS (Librosa)
@@ -101,7 +148,9 @@ def extract_features_from_audio(file_path):
         emotional_range = np.var(pitch_values) if len(pitch_values) > 0 else 0
         
         # 2. LINGUISTIC ANALYSIS (Vosk)
-        if vosk_model is None:
+        model_to_use = _get_vosk_model(language)
+        if model_to_use is None:
+            print(f"⚠️ No Vosk model available for language='{language}'.")
             return None
 
         wf = wave.open(file_path, "rb")
@@ -109,7 +158,7 @@ def extract_features_from_audio(file_path):
             print("Audio format mismatch. Expecting Mono 16kHz WAV.")
             # return None # You might want to handle conversion here if needed
 
-        rec = KaldiRecognizer(vosk_model, wf.getframerate())
+        rec = KaldiRecognizer(model_to_use, wf.getframerate())
         rec.SetWords(True)
         
         results = []
@@ -160,15 +209,35 @@ def extract_features_from_audio(file_path):
         print(f"❌ Feature Extraction Error: {e}")
         return None
 
-def get_prediction(audio_path):
+def apply_hindi_calibration(features_df):
+    """Shifts the 5 ASR-derived features by the English-vs-Hindi healthy-baseline
+    offset (see calibrate_hindi.py). No-op until that calibration file exists,
+    which means Hindi runs in raw cross-lingual-transfer mode until then."""
+    if not hindi_calibration:
+        return features_df
+    calibrated = features_df.copy()
+    for feature in LINGUISTIC_FEATURES:
+        if feature not in calibrated.columns or feature not in hindi_calibration:
+            continue
+        new_val = max(0.0, calibrated.at[0, feature] + hindi_calibration[feature])
+        if feature == "word_count":
+            new_val = round(new_val)
+        calibrated.at[0, feature] = new_val
+    return calibrated
+
+
+def get_prediction(audio_path, language="en"):
     """ Returns: (Label, Confidence, Features) """
     if clf is None:
         return "Model Error", 0.0, None
 
-    features_df = extract_features_from_audio(audio_path)
-    
+    features_df = extract_features_from_audio(audio_path, language=language)
+
     if features_df is None:
         return "Processing Error", 0.0, None
+
+    if language == "hi":
+        features_df = apply_hindi_calibration(features_df)
 
     # Scale features if scaler exists
     features_final = features_df
