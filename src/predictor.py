@@ -83,6 +83,15 @@ def is_hindi_available():
     return vosk_model_hi is not None
 
 
+def is_model_loaded():
+    """False if the classifier failed to load (e.g. a dependency version
+    mismatch between training and deployment, like the numpy 2.x/1.x pickle
+    incompatibility this project hit once already - see requirements.txt).
+    Checking this at startup surfaces that immediately instead of only after
+    a user runs an analysis and gets a generic 'could not extract' error."""
+    return clf is not None
+
+
 acoustic_clf = None
 acoustic_scaler = None
 

@@ -10,7 +10,7 @@ import random # Imported at top for cleaner code
 
 # --- IMPORT BACKEND ---
 try:
-    from predictor import get_prediction, generate_clinical_summary, is_hindi_available
+    from predictor import get_prediction, generate_clinical_summary, is_hindi_available, is_model_loaded
     from db import init_db, save_result, get_history
 except ImportError as e:
     st.error(f"❌ CRITICAL ERROR: {e}")
@@ -27,6 +27,13 @@ st.set_page_config(
 if "db_init" not in st.session_state:
     init_db()
     st.session_state["db_init"] = True
+
+if not is_model_loaded():
+    st.error(
+        "⚠️ The classifier model failed to load on this server - every analysis will fail. "
+        "This is a deployment/dependency problem, not something wrong with your audio. "
+        "Check the app's deploy logs (Manage app > logs) for the Python traceback at startup."
+    )
 
 # --- DYNAMIC PATH SETUP (THE FIX) ---
 # We calculate the path to brain.png relative to this file (app.py)
@@ -255,6 +262,12 @@ with tab1:
                             "notes": notes,
                         }
                         st.success("Analysis Complete! switch to 'Biomarker Details' tab to view results.")
+                    elif label == "Model Error":
+                        st.error(
+                            "⚠️ The classifier model failed to load on this server (not an audio problem). "
+                            "Check the app's deploy logs for the exact error - this usually means a "
+                            "dependency version mismatch between training and deployment."
+                        )
                     else:
                         st.error("Analysis Failed: Could not extract biomarkers. Please ensure you spoke clearly or try recording again.")
 
