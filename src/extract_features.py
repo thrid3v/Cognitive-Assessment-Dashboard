@@ -1,6 +1,5 @@
 import os
 import json
-import wave
 import pandas as pd
 import numpy as np
 import librosa
@@ -40,24 +39,25 @@ def analyze_audio(file_path):
         emotional_range = np.var(pitch_values) if len(pitch_values) > 0 else 0
 
         # PART B: LINGUISTIC TIMING
-        wf = wave.open(file_path, "rb")
-        if wf.getnchannels() != 1 or wf.getsampwidth() != 2:
-            wf.close()
-            return None
+        # Feed Vosk the audio librosa already loaded/resampled above, as raw
+        # 16-bit PCM, instead of re-opening the file with the stdlib `wave`
+        # module - `wave` only understands integer PCM WAV and raises
+        # `wave.Error: unknown format: 3` outright on float32 WAV (see
+        # predictor.py's extract_features_from_audio for the full story).
+        pcm_bytes = (np.clip(y, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
 
-        rec = KaldiRecognizer(model, wf.getframerate())
+        rec = KaldiRecognizer(model, sr)
         rec.SetWords(True)
         results = []
-        while True:
-            data = wf.readframes(4000)
-            if len(data) == 0: break
-            if rec.AcceptWaveform(data):
+        chunk_size = 8000  # bytes; matches the previous 4000-sample chunking (2 bytes/sample)
+        for i in range(0, len(pcm_bytes), chunk_size):
+            chunk = pcm_bytes[i:i + chunk_size]
+            if rec.AcceptWaveform(chunk):
                 part = json.loads(rec.Result())
                 if 'result' in part: results.extend(part['result'])
 
         final_part = json.loads(rec.FinalResult())
         if 'result' in final_part: results.extend(final_part['result'])
-        wf.close()
 
         if not results: return None
 

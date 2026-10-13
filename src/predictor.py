@@ -1,5 +1,4 @@
 import os
-import wave
 import json
 import pickle
 import numpy as np
@@ -187,27 +186,35 @@ def extract_features_from_audio(file_path, language="en"):
             print(f"⚠️ No Vosk model available for language='{language}'.")
             return None
 
-        wf = wave.open(file_path, "rb")
-        if wf.getnchannels() != 1 or wf.getsampwidth() != 2 or wf.getcomptype() != "NONE":
-            print("Audio format mismatch. Expecting Mono 16kHz WAV.")
-            # return None # You might want to handle conversion here if needed
+        # Feed Vosk the audio librosa already loaded/resampled above, as raw
+        # 16-bit PCM, instead of re-opening the original file with the stdlib
+        # `wave` module. `wave` only understands plain integer PCM WAV (format
+        # tag 1) and raises `wave.Error: unknown format: 3` outright on
+        # float32 WAV (format tag 3) - which is what browser-based recorders
+        # (e.g. Streamlit's st.audio_input, via the Web Audio API) can
+        # produce, since Web Audio natively works in float32. librosa/
+        # soundfile handle that format fine, so reuse what already loaded
+        # successfully rather than re-parsing the file a second, less capable
+        # way. This also sidesteps the old silent sample-width mismatch case
+        # (format check that printed a warning but fed Vosk the raw bytes
+        # anyway, corrupting recognition if the original wasn't 16-bit PCM).
+        pcm_bytes = (np.clip(y, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
 
-        rec = KaldiRecognizer(model_to_use, wf.getframerate())
+        rec = KaldiRecognizer(model_to_use, sr)
         rec.SetWords(True)
-        
+
         results = []
-        while True:
-            data = wf.readframes(4000)
-            if len(data) == 0: break
-            if rec.AcceptWaveform(data):
+        chunk_size = 8000  # bytes; matches the previous 4000-sample chunking (2 bytes/sample)
+        for i in range(0, len(pcm_bytes), chunk_size):
+            chunk = pcm_bytes[i:i + chunk_size]
+            if rec.AcceptWaveform(chunk):
                 part = json.loads(rec.Result())
                 if 'result' in part: results.extend(part['result'])
-        
+
         final_part = json.loads(rec.FinalResult())
         if 'result' in final_part: results.extend(final_part['result'])
-        wf.close()
-        
-        if not results: 
+
+        if not results:
             print("No words detected by Vosk.")
             return None
 
