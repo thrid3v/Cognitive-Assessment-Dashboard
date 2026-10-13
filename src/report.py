@@ -29,7 +29,7 @@ def generate_pdf(patient_id, stats, risk_label, filename="report.pdf"):
 
     # 2. Executive Summary
     pdf.set_font("Arial", 'B', size=16)
-    if "Decline" in risk_label:
+    if risk_label != "Healthy":
         pdf.set_text_color(220, 50, 50) # Red
         pdf.cell(200, 10, txt=f"Assessment: {risk_label.upper()}", ln=1)
     else:
@@ -48,17 +48,20 @@ def generate_pdf(patient_id, stats, risk_label, filename="report.pdf"):
     col_width = 60
     row_height = 10
     
+    # Reference ranges: mean +/- 1 std of the real Healthy class in
+    # data/dataset.csv (157 real clinical recordings) - see app.py for the
+    # same thresholds used in the live biomarker panel.
     data = [
         ("Metric", "Value", "Reference Range"),
-        ("Pause Rate", f"{stats['pause_rate']:.2f}", "< 0.40"),
-        ("Vocab Richness", f"{stats['vocab_richness']:.2f}", "> 0.50"),
-        ("Word Count", f"{stats['word_count']}", "N/A"),
-        ("Speech Rate", f"{stats['speech_rate']:.2f}", "> 2.5 sps"),
-        ("Initial Latency", f"{stats['initial_latency']:.2f}s", "< 0.5s"),
-        ("Acoustic Texture", f"{stats['acoustic_texture']:.2f}", "Baseline"),
-        ("MFCC Delta", f"{stats['mfcc_delta']:.4f}", "High Var"),
-        ("Speech Brightness", f"{stats['speech_brightness']:.0f}", "> 1500 Hz"),
-        ("Emotional Range", f"{stats['emotional_range']:.2f}", "> 50"),
+        ("Pause Rate", f"{stats['pause_rate']:.2f}", "< 0.35"),
+        ("Vocab Richness", f"{stats['vocab_richness']:.2f}", "> 0.55"),
+        ("Word Count", f"{stats['word_count']}", "> 80"),
+        ("Speech Rate", f"{stats['speech_rate']:.2f}", "> 1.9 wps"),
+        ("Initial Latency", f"{stats['initial_latency']:.2f}s", "< 3.0s"),
+        ("Acoustic Texture", f"{stats['acoustic_texture']:.2f}", "> -30"),
+        ("MFCC Delta", f"{stats['mfcc_delta']:.4f}", "|delta| < 0.015"),
+        ("Speech Brightness", f"{stats['speech_brightness']:.0f}", "> 1600 Hz"),
+        ("Emotional Range", f"{stats['emotional_range']:.2f}", "> 1,000,000"),
     ]
     
     for row in data:
@@ -73,8 +76,8 @@ def generate_pdf(patient_id, stats, risk_label, filename="report.pdf"):
     pdf.cell(200, 10, txt="Clinical Interpretation", ln=1)
     pdf.set_font("Arial", size=12)
     
-    if "Decline" in risk_label:
-        text = ("The patient exhibited significant acoustic hesitations (Pause Rate > 0.4). "
+    if risk_label != "Healthy":
+        text = ("The patient exhibited significant acoustic hesitations (Pause Rate > 0.35). "
                 "Combined with reduced vocabulary richness, this pattern is consistent with "
                 "early-stage anomic aphasia. Immediate neurological consultation is recommended.")
     else:

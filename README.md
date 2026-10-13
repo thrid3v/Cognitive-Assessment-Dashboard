@@ -59,17 +59,17 @@ The application will open in your default browser at `http://localhost:8501`
 
 ### Optional: Retrain the Model
 
-If you want to retrain the model with new data:
+The model is trained on real clinical speech recordings (Cookie Theft picture-description task), not on data shipped in this repo — the source audio is a third-party research dataset and isn't redistributed here. To retrain with that data (or your own):
+
+1. Edit `EXTERNAL_CSV_PATH` and `EXTERNAL_AUDIO_ROOT` at the top of `src/extract_features.py` to point at your labeled CSV (needs `Record-ID`, `Class` columns, with `Class` in `HC`/`MCI`/`Dementia`) and the matching audio folder (`<root>/<Record-ID>/<Record-ID>__CTD.wav`).
+2. Run the pipeline from the project root:
 
 ```bash
-cd src
-
-# Step 1: Generate synthetic training data
-python generate_synthetic_data.py
-
-# Step 2: Train the model
-python train_model.py
+python src/extract_features.py   # -> data/dataset.csv (biomarkers only, no raw audio/PII)
+python src/train_model.py        # -> models/neuro_model.pkl, models/scaler.pkl
 ```
+
+`data/dataset.csv` holds only the 9 numeric biomarkers + label per recording — safe to commit even when the source audio isn't.
 
 ---
 
@@ -81,57 +81,57 @@ NeuroSentinel analyzes speech using **9 distinct biomarkers** across acoustic, p
 - **Type**: Linguistic Timing
 - **Description**: Ratio of pause time to total speech duration
 - **Calculation**: `pause_time / total_duration` (pauses > 0.25s)
-- **Clinical Significance**: Elevated pause rates (>0.4) indicate hesitations and word-finding difficulties, common in early cognitive decline
-- **Healthy Range**: < 0.40
+- **Clinical Significance**: Elevated pause rates (>0.35) indicate hesitations and word-finding difficulties, common in early cognitive decline
+- **Healthy Range**: < 0.35 (mean − 1 std of the real Healthy class, `data/dataset.csv`)
 
 ### 2. **Vocabulary Richness (Type-Token Ratio)**
 - **Type**: Linguistic Complexity
 - **Description**: Ratio of unique words to total words spoken
 - **Calculation**: `len(unique_words) / len(total_words)`
 - **Clinical Significance**: Reduced lexical diversity suggests semantic memory impairment
-- **Healthy Range**: > 0.50
+- **Healthy Range**: > 0.55 (mean − 1 std of the real Healthy class)
 
 ### 3. **Word Count**
 - **Type**: Linguistic Fluency
 - **Description**: Total number of words spoken in the recording
 - **Calculation**: Direct count from speech-to-text transcription
 - **Clinical Significance**: Lower word counts may indicate reduced verbal fluency
-- **Healthy Range**: > 20 words (for typical assessment)
+- **Healthy Range**: > 80 words (for an unscripted ~1-2 minute description task; scales with recording length)
 
 ### 4. **Speech Rate**
 - **Type**: Temporal Dynamics
 - **Description**: Words spoken per second
 - **Calculation**: `word_count / total_duration`
-- **Clinical Significance**: Slowed speech rate (<2.0 wps) correlates with processing speed deficits
-- **Healthy Range**: > 2.0 words per second
+- **Clinical Significance**: Slowed speech rate (<1.9 wps) correlates with processing speed deficits
+- **Healthy Range**: > 1.9 words per second
 
 ### 5. **Initial Latency**
 - **Type**: Response Time
 - **Description**: Time delay before first word is spoken
 - **Calculation**: Timestamp of first word from recording start
-- **Clinical Significance**: Delayed response (>0.5s) indicates cognitive processing delays
-- **Healthy Range**: < 0.5 seconds
+- **Clinical Significance**: Delayed response indicates cognitive processing delays
+- **Healthy Range**: < 3.0 seconds (real unscripted responses to a picture-description prompt vary a lot more than a scripted 0.5s cutoff assumed)
 
 ### 6. **Acoustic Texture (MFCC Mean)**
 - **Type**: Acoustic Feature
-- **Description**: Mean of first Mel-Frequency Cepstral Coefficient
-- **Calculation**: `np.mean(librosa.feature.mfcc(y, sr, n_mfcc=13)[0])`
+- **Description**: Mean across all 13 Mel-Frequency Cepstral Coefficients
+- **Calculation**: `np.mean(librosa.feature.mfcc(y, sr, n_mfcc=13))`
 - **Clinical Significance**: Reflects voice quality and articulatory precision; changes may indicate motor speech disorders
-- **Healthy Range**: Baseline comparison (typically > -350)
+- **Healthy Range**: > -30 (mean − 1 std of the real Healthy class; this range changed substantially from older versions of this doc because the calculation itself changed from "mean of 1st MFCC" to "mean of all 13 MFCCs" — don't reuse the old -350 cutoff)
 
 ### 7. **MFCC Delta**
 - **Type**: Acoustic Dynamics
 - **Description**: Rate of change in MFCCs (spectral dynamics)
 - **Calculation**: `np.mean(librosa.feature.delta(mfcc))`
 - **Clinical Significance**: High variability suggests unstable articulation; low variability indicates monotonous speech
-- **Healthy Range**: Stable values (|delta| < 0.05)
+- **Healthy Range**: Stable values (|delta| < 0.015)
 
 ### 8. **Speech Brightness (Spectral Centroid)**
 - **Type**: Acoustic Feature
 - **Description**: Center of mass of the frequency spectrum
 - **Calculation**: `np.mean(librosa.feature.spectral_centroid(y, sr))`
 - **Clinical Significance**: Lower values indicate muffled or less energetic speech, associated with reduced vocal effort
-- **Healthy Range**: > 1500 Hz
+- **Healthy Range**: > 1600 Hz
 
 ### 9. **Emotional Range (Pitch Variance)**
 - **Type**: Prosodic Feature
@@ -145,10 +145,11 @@ NeuroSentinel analyzes speech using **9 distinct biomarkers** across acoustic, p
 ## 🧠 Machine Learning Models
 
 ### Primary Classification Model
-- **Algorithm**: Random Forest Classifier
+- **Algorithm**: Random Forest Classifier, binary output (Healthy / Dementia — see "Classification Categories" below for why there's no middle label)
 - **Implementation**: `sklearn.ensemble.RandomForestClassifier`
-- **Training Data**: 2,000 synthetic samples (500 per class)
+- **Training Data**: 157 real clinical recordings (Cookie Theft picture-description task). Source labels are Healthy / MCI / Dementia by clinicians, but MCI is folded into the Healthy bucket for training (82 Healthy + 59 MCI = 141 "Healthy" vs. 16 Dementia) — see "Classification Categories" below for why
 - **Feature Preprocessing**: StandardScaler normalization
+- **Class Imbalance Handling**: `class_weight` grid-searched; decision uses a probability threshold (not bare most-likely-class) tuned for conservative flagging — see "Classification Categories"
 - **Hyperparameter Optimization**: GridSearchCV with 5-fold cross-validation
 
 #### Optimized Hyperparameters
@@ -170,16 +171,16 @@ NeuroSentinel analyzes speech using **9 distinct biomarkers** across acoustic, p
 
 ### Hindi Language Support (Experimental)
 
-Hindi is supported by reusing the English-trained Random Forest classifier rather than training a separate Hindi model, since no labeled Hindi cognitive-decline speech dataset exists publicly or was otherwise accessible for this project. This works because:
+No labeled Hindi cognitive-decline speech dataset exists publicly or was otherwise accessible for this project, so Hindi is supported via cross-lingual transfer: a Hindi recording is transcribed with `vosk-model-small-hi-0.22`, all 9 biomarkers are computed, but **only the 4 waveform-derived biomarkers** (acoustic texture, MFCC delta, speech brightness, emotional range) are scored — by `models/neuro_model_acoustic.pkl`, a separate Random Forest trained on the same 157 English recordings using just those 4 features. The 5 speech-to-text-derived biomarkers (pause rate, vocabulary richness, word count, speech rate, initial latency) are still shown in the UI for information, but don't feed the classification decision.
 
-- The 4 pure-acoustic biomarkers (MFCC mean, MFCC delta, spectral centroid, pitch variance) are computed directly from the waveform and are language-independent.
-- The 5 ASR-derived biomarkers (pause rate, vocabulary richness, word count, speech rate, initial latency) depend on Hindi transcription (via `vosk-model-small-hi-0.22`) and can shift for reasons unrelated to cognitive status (e.g. Hindi's word segmentation differs from English's).
+**Why not use all 9 features, or calibrate the other 5?** Both were tried and rejected on evidence, not just caution:
+- The 5 ASR-derived biomarkers depend on language-specific transcription (word segmentation, what counts as a pause) and the only Hindi reference audio available to calibrate them (15 clips from the OpenSLR SLR103 ASR benchmark) turned out to be 5-second scripted sentence reads, not spontaneous narration like the live app's task — their pause rate and word count differ from the English baseline by 12-16x, almost entirely due to utterance length, not language. Calibrating against that reference would mostly correct for "short scripted sentence vs. long spontaneous narrative" and badly distort real recordings.
+- The acoustic-only model performs about as well as the full 9-feature model on English data (sensitivity 25% vs. 31%, specificity 97% vs. 87% at the same threshold — see `models/metrics.json`), so dropping the 5 ASR-derived features costs little and is actually more conservative.
+- However, testing the acoustic-only model against those same 15 Hindi reference clips classified **0 of 15 as Healthy** - not because cross-lingual transfer failed, but because the clips are genuine 8kHz telephone-bandwidth recordings (confirmed: 0.08% of spectral energy above 4kHz, vs 7% for the English recordings) completely lacking the frequency content `speech_brightness`/MFCCs are computed from. That's a recording-equipment artifact, not a language or health signal — but it meant this particular reference set couldn't validate (or invalidate) the approach either way.
 
-To correct for that, `src/calibrate_hindi.py` computes the mean of those 5 features across a handful of healthy Hindi recordings (`data/healthy_hindi/*.wav`) and offsets them to match the English healthy baseline before scoring. **Limitation**: since no Hindi recordings with diagnosed/observed cognitive decline were available to validate against, this calibration is checked only against healthy speakers — it has *not* been validated on Hindi speech reflecting actual cognitive decline. Treat Hindi results as experimental; the UI displays this caveat whenever Hindi mode is used.
+**Bottom line**: the acoustic-only architecture is the more defensible design (fewer features that can plausibly be confounded by language), but it is **not empirically validated on any real Hindi speech** — favorable or not. If you get access to even a handful of Hindi speakers recorded through this app itself (same mic, same spontaneous-description task as the live assessment), that would be real validation data; a mismatched reference corpus (different recording equipment and/or a different speech task) isn't.
 
-**Setup**: download and extract [`vosk-model-small-hi-0.22`](https://alphacephei.com/vosk/models) into `models/vosk-model-small-hi-0.22/`. Calibration is optional — without it, Hindi mode still works using raw cross-lingual transfer; run `python calibrate_hindi.py` (from `src/`) after adding a few recordings to `data/healthy_hindi/` to enable it.
-
-The calibration currently shipped (`models/hindi_calibration.json`) was generated from 15 clips of the OpenSLR SLR103 Hindi ASR corpus (general adult speech, not age/health-screened controls) — see `data/healthy_hindi/SOURCE.md` for provenance and its limitations. On that sample, 14/15 clips classified as "Healthy" both with and without calibration, so on this dataset it mainly served as a validation check rather than a large correction. Swap in real Hindi speaker recordings and re-run the script if you get access to any.
+**Setup**: download and extract [`vosk-model-small-hi-0.22`](https://alphacephei.com/vosk/models) into `models/vosk-model-small-hi-0.22/`. No additional setup is needed — Hindi mode activates automatically once that model is present.
 
 ### Feature Extraction Libraries
 - **Librosa**: Acoustic and prosodic feature extraction (MFCCs, spectral centroid, pitch tracking)
@@ -190,14 +191,25 @@ The calibration currently shipped (`models/hindi_calibration.json`) was generate
 
 ## 🎯 Classification Categories
 
-The system classifies cognitive health into **4 categories**:
+The system outputs **only two labels: Healthy or Dementia.** There is deliberately no "MCI"/"mild" middle label in the app, for two reasons:
 
-| Label | Code | Description | Clinical Indicators |
-|-------|------|-------------|---------------------|
-| **Healthy** | 0 | Normal cognitive function | Low pause rate, high vocab richness, normal speech rate |
-| **Mild Decline** | 1 | Early cognitive impairment | Slight hesitations, reduced lexical diversity |
-| **Moderate Decline** | 2 | Moderate cognitive impairment | Noticeable pauses, slowed speech, reduced word count |
-| **Severe Decline** | 3 | Advanced cognitive impairment | Significant delays, very low fluency, flat prosody |
+1. **Early testing showed normal conversational pauses/hesitation getting flagged as decline.** A 3-class model (Healthy / MCI / Dementia) was too willing to call ordinary variation "MCI."
+2. **The decision is conservative by design**: "Dementia" is only reported when the model's predicted probability clears a threshold (currently **0.40**), not just whichever class is more likely. Below that threshold, the result is "Healthy" — full stop, no intermediate label.
+
+MCI recordings are folded into the "Healthy" training label (not into "Dementia") specifically so the model learns to leave ambiguous/mild cases alone rather than flag them — see `train_model.py`.
+
+**The real trade-off** (measured via repeated cross-validation, not a single lucky/unlucky split — see `models/metrics.json`):
+
+| Threshold | Sensitivity (catches real Dementia) | Specificity (leaves Healthy/MCI alone) |
+|---|---|---|
+| 0.30 | 44% | 75% |
+| **0.40 (current)** | **31%** | **87%** |
+| 0.50 | 12% | 93% |
+| 0.60+ | ~0% | ~99% |
+
+With only 16 real Dementia examples in the training data, there is no threshold that is both conservative (few false alarms) and sensitive (catches most real cases) — this is a genuine limitation of the data, not a tunable bug. At 0.40, the model catches roughly **1 in 3** real Dementia cases and leaves **87%** of Healthy/MCI speakers alone. **This is a screening aid that errs toward not alarming healthy users, not a tool to rule out dementia** — a "Healthy" result does not mean decline has been ruled out.
+
+**Recording quality notes**: when the result is "Healthy," the app also checks the recording itself (duration, word count, volume, speaking pace, pause pattern) and surfaces short tips like *"Recording was quite short — try speaking for 30-60 seconds"* when something about the recording — not necessarily the person's cognition — looks like it could have affected the result. See `predictor.assess_recording_quality()`.
 
 ---
 
@@ -208,20 +220,22 @@ hack_sphere/
 ├── src/
 │   ├── app.py                      # Main Streamlit application
 │   ├── predictor.py                # Prediction engine and feature extraction
-│   ├── extract_features.py         # Batch feature extraction from audio files
+│   ├── extract_features.py         # Batch feature extraction from labeled audio (external dataset)
 │   ├── train_model.py              # Model training with hyperparameter tuning
-│   ├── generate_synthetic_data.py  # Synthetic data generation
+│   ├── generate_synthetic_data.py  # (legacy, unused by default) Gaussian data augmentation
 │   ├── db.py                       # SQLite database operations
 │   ├── report.py                   # PDF report generation
-│   └── visualize_results.py        # Data visualization utilities
+│   └── visualize_results.py        # Confusion matrix visualization
 ├── models/
-│   ├── neuro_model.pkl             # Trained Random Forest model
+│   ├── neuro_model.pkl             # Trained Random Forest model (9 features, English)
 │   ├── scaler.pkl                  # Feature scaler (StandardScaler)
-│   └── vosk-model-small-en-us-0.15/  # Speech recognition model
+│   ├── neuro_model_acoustic.pkl    # Acoustic-only model (4 features, used for Hindi)
+│   ├── scaler_acoustic.pkl         # Feature scaler for the acoustic-only model
+│   ├── metrics.json                # Honest held-out/cross-validated accuracy (not training accuracy)
+│   ├── vosk-model-small-en-us-0.15/  # English speech recognition model
+│   └── vosk-model-small-hi-0.22/     # Hindi speech recognition model (optional)
 ├── data/
-│   ├── dataset.csv                 # Original feature dataset
-│   ├── synthetic_dataset.csv       # Augmented training data
-│   └── [healthy/mild/moderate/severe]/  # Audio file folders
+│   └── dataset.csv                 # Extracted biomarkers + labels (no raw audio/PII)
 ├── neuro.db                        # SQLite database for patient records
 ├── requirements.txt                # Python dependencies
 └── README.md                       # This file
@@ -266,13 +280,18 @@ hack_sphere/
 
 ## 📈 Model Performance
 
-- **Dataset Accuracy**: Calculated in real-time against local dataset
-- **Live Trial Accuracy**: User-confirmed predictions during clinical use
+**Accuracy is not reported anywhere in this app, deliberately.** On a binary problem that's 141 Healthy vs. 16 Dementia (~90%/10%), a model that always says "Healthy" scores ~90% accuracy while being useless — so "accuracy" would be actively misleading here, the same way the old training-accuracy badge was (see git history). The metrics that matter are **sensitivity** (fraction of real Dementia cases caught) and **specificity** (fraction of Healthy/MCI people correctly left alone), computed via **repeated cross-validation** (5-fold × 20 repeats = 100 out-of-fold evaluations per sample, not a single train/test split, which would be too noisy with only 16 positive examples):
+
+- **Full 9-feature model** (English): sensitivity 31%, specificity 87% at the 0.40 decision threshold — see `models/metrics.json` for the exact counts (true/false positives/negatives).
+- **Acoustic-only model** (Hindi): sensitivity 25%, specificity 97% — fewer features, so it's naturally more conservative.
+
+Treat this as a research-grade screening aid tuned to minimize false alarms on ordinary speech variation, not a diagnostic tool and not something that rules out dementia when it says "Healthy." See "Classification Categories" above for the full sensitivity/specificity trade-off at other thresholds and why 0.40 was chosen.
+
 - **Optimization Techniques**:
   - Feature scaling (StandardScaler)
-  - Balanced synthetic data generation
-  - Hyperparameter tuning via GridSearchCV
-  - 5-fold cross-validation
+  - Class-weight balancing (grid-searched)
+  - Hyperparameter tuning via GridSearchCV, scored on `balanced_accuracy` (plain accuracy would reward configs that just lean on the majority Healthy class)
+  - Decision threshold tuned on out-of-fold cross-validated probabilities, not training-set predictions
 
 ---
 
@@ -310,8 +329,9 @@ hack_sphere/
 - 9-metric dashboard with color-coded indicators
 - Neurological fingerprint radar chart
 - Clinical observations in elderly-friendly format
+- Recording quality notes (e.g. "recording was short" / "audio volume seemed low") when the recording itself may have affected the result — not a diagnostic claim
 - PDF report download
-- Manual accuracy tracking (confirm correct/incorrect)
+- Manual trial tracking (confirm correct/incorrect)
 
 ### Tab 3: Clinical History
 - Longitudinal trend graphs for key biomarkers
@@ -339,22 +359,15 @@ fpdf               # PDF report generation
 
 ### Extract Features from Audio Files
 ```bash
-cd src
-python extract_features.py
+python src/extract_features.py
 ```
-Processes audio files in `data/healthy/`, `data/mild/`, `data/moderate/`, `data/severe/` folders.
-
-### Generate Synthetic Training Data
-```bash
-python generate_synthetic_data.py
-```
-Creates 2,000 balanced samples (500 per class) based on original dataset statistics.
+Reads `EXTERNAL_CSV_PATH`/`EXTERNAL_AUDIO_ROOT` (edit these constants in the script to point at your labeled dataset) and writes `data/dataset.csv`.
 
 ### Train Model
 ```bash
-python train_model.py
+python src/train_model.py
 ```
-Performs hyperparameter tuning and saves optimized model to `models/neuro_model.pkl`.
+Performs hyperparameter tuning on `data/dataset.csv` and saves the optimized model to `models/neuro_model.pkl`.
 
 ### Run Application
 ```bash
@@ -396,19 +409,19 @@ Each assessment generates a clinical report containing:
 
 - **Not a diagnostic tool**: For research and screening purposes only
 - **Requires clinical validation**: Predictions should be confirmed by healthcare professionals
-- **Language limitation**: Native support for English (US); Hindi support is experimental cross-lingual transfer, validated only against healthy speakers (see Hindi Language Support above)
+- **Language limitation**: Native support for English (US); Hindi support uses a separate acoustic-only model and is completely unvalidated on real Hindi speech, in either direction (see Hindi Language Support above)
 - **Audio quality**: Requires clear recordings in quiet environments
-- **Sample size**: Performance depends on training data quality
+- **Sample size**: Trained on 157 real recordings (141 Healthy incl. MCI / 16 Dementia) — with only 16 positive examples, sensitivity/specificity estimates have real uncertainty, and there's no threshold that's both conservative and reliably catches most real cases (see "Classification Categories")
+- **Single task**: Trained only on the Cookie Theft picture-description task; may not generalize to other speech elicitation tasks
 
 ---
 
 ## 🤝 Contributing
 
 To extend the system:
-1. Add new audio samples to `data/` folders
-2. Run `extract_features.py` to update dataset
-3. Generate synthetic data with `generate_synthetic_data.py`
-4. Retrain model using `train_model.py`
+1. Add new labeled recordings to your external dataset (CSV + audio folder)
+2. Run `extract_features.py` to update `data/dataset.csv`
+3. Retrain the model using `train_model.py`
 
 ---
 

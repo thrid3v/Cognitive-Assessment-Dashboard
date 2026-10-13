@@ -10,7 +10,7 @@ import random # Imported at top for cleaner code
 
 # --- IMPORT BACKEND ---
 try:
-    from predictor import get_prediction, generate_clinical_summary, calculate_current_accuracy, is_hindi_available
+    from predictor import get_prediction, generate_clinical_summary, is_hindi_available
     from db import init_db, save_result, get_history
 except ImportError as e:
     st.error(f"❌ CRITICAL ERROR: {e}")
@@ -27,8 +27,6 @@ st.set_page_config(
 if "db_init" not in st.session_state:
     init_db()
     st.session_state["db_init"] = True
-
-current_accuracy = calculate_current_accuracy()
 
 # --- DYNAMIC PATH SETUP (THE FIX) ---
 # We calculate the path to brain.png relative to this file (app.py)
@@ -110,8 +108,12 @@ with st.sidebar:
     language_code = "hi" if language_display.startswith("Hindi") else "en"
     if language_code == "hi":
         st.caption(
-            "⚠️ Hindi analysis uses cross-lingual biomarker transfer, calibrated against "
-            "healthy Hindi speech only. Not yet validated against Hindi cognitive-decline cases."
+            "⚠️ Hindi analysis uses only the 4 waveform-derived biomarkers (acoustic "
+            "texture, MFCC delta, brightness, pitch variance), scored by a separate "
+            "model trained on the same English recordings - the 5 speech-to-text-derived "
+            "biomarkers aren't used for Hindi since they can't be reliably corrected "
+            "across languages with the data available. This is unvalidated on real Hindi "
+            "speech in either direction (healthy or decline) - treat results as experimental."
         )
     st.markdown("---")
 
@@ -119,9 +121,6 @@ with st.sidebar:
         st.session_state.session_correct = 0
         st.session_state.session_total = 0
         st.rerun()
-    
-    st.subheader("📊 System Benchmarks")
-    st.metric("Live Dataset Accuracy", f"{current_accuracy}%", delta="Real-time")
 
 # --- 3. MAIN APP LAYOUT ---
 st.title("Cognitive Assessment Dashboard")
@@ -206,8 +205,9 @@ with tab1:
 
     if language_code == "hi":
         st.info(
-            "🌐 Recording in Hindi: results use cross-lingual biomarker transfer, calibrated "
-            "against healthy Hindi speech only. Not yet validated against Hindi cognitive-decline cases."
+            "🌐 Recording in Hindi: scoring uses only the 4 waveform-derived biomarkers "
+            "(not the speech-to-text-derived ones). Unvalidated on real Hindi speech - "
+            "treat as experimental."
         )
 
     # Audio Input
@@ -225,7 +225,7 @@ with tab1:
         with col2:
             if st.button("RUN ANALYSIS 🚀", type="primary", use_container_width=True):
                 with st.spinner("Extracting 9 Neurological Biomarkers..."):
-                    label, confidence, data = get_prediction("temp_input.wav", language=language_code)
+                    label, confidence, data, notes = get_prediction("temp_input.wav", language=language_code)
 
                     if data is not None:
                         # Pass entire data dict to save_result
@@ -251,7 +251,8 @@ with tab1:
                             "label": label, "conf": confidence, "data": data,
                             "summary": generate_clinical_summary(data),
                             "report_path": report_path,
-                            "language": language_code
+                            "language": language_code,
+                            "notes": notes,
                         }
                         st.success("Analysis Complete! switch to 'Biomarker Details' tab to view results.")
                     else:
@@ -269,46 +270,57 @@ with tab2:
 
         if res.get('language') == 'hi':
             st.info(
-                "🌐 This assessment used Hindi cross-lingual biomarker transfer, calibrated "
-                "against healthy Hindi speech only. Not yet validated against Hindi "
-                "cognitive-decline cases."
+                "🌐 This result used only the 4 waveform-derived biomarkers below "
+                "(the 5 speech-to-text-derived ones are shown for information but "
+                "weren't part of the decision). Unvalidated on real Hindi speech - "
+                "treat as experimental."
             )
 
         # --- Result Alert ---
-        if "Decline" in label:
-            st.error(f"🚨 RESULT: {label.upper()} (Confidence: {res['conf']:.1f}%)")
+        if label != "Healthy":
+            st.error(f"🚨 RESULT: {label.upper()} (Confidence: {res['conf']*100:.0f}%)")
         else:
-            st.success(f"✅ RESULT: {label.upper()} (Confidence: {res['conf']:.1f}%)")
-        
+            st.success(f"✅ RESULT: {label.upper()} (Confidence: {res['conf']*100:.0f}%)")
+
         # --- Clinical Reasoning ---
         st.markdown(f"""<div class="report-box"><strong>Clinical Observations:</strong><br>{res['summary']}</div>""", unsafe_allow_html=True)
 
+        # --- Recording Notes (quality tips, not a diagnostic claim) ---
+        if res.get('notes'):
+            st.markdown("##### 🎙️ Recording Notes")
+            for note in res['notes']:
+                st.info(note)
+
         st.markdown("##### 🧪 9-Point Neurological Panel")
-        
+        # Thresholds below are mean - 1 std (or + 1 std, direction depending on
+        # the biomarker) of the real Healthy class in data/dataset.csv (157
+        # real clinical recordings) - NOT the old thresholds eyeballed against
+        # 7 short seed recordings. Recompute these if the training data changes.
+
         # Row 1
         m1, m2, m3 = st.columns(3)
-        m1.metric("Pause Rate", f"{data['pause_rate'][0]:.2f}", 
-                    delta="Risk" if data['pause_rate'][0] > 0.4 else "Normal", delta_color="inverse")
+        m1.metric("Pause Rate", f"{data['pause_rate'][0]:.2f}",
+                    delta="Risk" if data['pause_rate'][0] > 0.35 else "Normal", delta_color="inverse")
         m2.metric("Vocab Richness", f"{data['vocab_richness'][0]:.2f}",
-                    delta="Good" if data['vocab_richness'][0] > 0.75 else "Low", delta_color="normal" if data['vocab_richness'][0] > 0.75 else "inverse")
+                    delta="Good" if data['vocab_richness'][0] > 0.55 else "Low", delta_color="normal" if data['vocab_richness'][0] > 0.55 else "inverse")
         m3.metric("Word Count", f"{data['word_count'][0]}",
-                    delta="Good" if data['word_count'][0] > 20 else "Low", delta_color="normal" if data['word_count'][0] > 20 else "inverse")
-        
+                    delta="Good" if data['word_count'][0] > 80 else "Low", delta_color="normal" if data['word_count'][0] > 80 else "inverse")
+
         # Row 2
         m4, m5, m6 = st.columns(3)
         m4.metric("Speech Rate", f"{data['speech_rate'][0]:.1f} wps",
-                    delta="Good" if data['speech_rate'][0] > 2.0 else "Slow", delta_color="normal" if data['speech_rate'][0] > 2.0 else "inverse")
+                    delta="Good" if data['speech_rate'][0] > 1.9 else "Slow", delta_color="normal" if data['speech_rate'][0] > 1.9 else "inverse")
         m5.metric("Initial Latency", f"{data['initial_latency'][0]:.2f}s",
-                    delta="Fast" if data['initial_latency'][0] < 0.5 else "Delayed", delta_color="normal" if data['initial_latency'][0] < 0.5 else "inverse")
+                    delta="Fast" if data['initial_latency'][0] < 3.0 else "Delayed", delta_color="normal" if data['initial_latency'][0] < 3.0 else "inverse")
         m6.metric("Acoustic Texture", f"{data['acoustic_texture'][0]:.2f}",
-                    delta="Clear" if data['acoustic_texture'][0] > -350 else "Muffled", delta_color="normal" if data['acoustic_texture'][0] > -350 else "inverse")
+                    delta="Clear" if data['acoustic_texture'][0] > -30 else "Muffled", delta_color="normal" if data['acoustic_texture'][0] > -30 else "inverse")
 
         # Row 3
         m7, m8, m9 = st.columns(3)
         m7.metric("MFCC Delta", f"{data['mfcc_delta'][0]:.4f}",
-                    delta="Stable" if abs(data['mfcc_delta'][0]) < 0.05 else "Variable", delta_color="normal" if abs(data['mfcc_delta'][0]) < 0.05 else "inverse")
+                    delta="Stable" if abs(data['mfcc_delta'][0]) < 0.015 else "Variable", delta_color="normal" if abs(data['mfcc_delta'][0]) < 0.015 else "inverse")
         m8.metric("Brightness", f"{data['speech_brightness'][0]:.0f} Hz",
-                    delta="Good" if data['speech_brightness'][0] > 1500 else "Low", delta_color="normal" if data['speech_brightness'][0] > 1500 else "inverse")
+                    delta="Good" if data['speech_brightness'][0] > 1600 else "Low", delta_color="normal" if data['speech_brightness'][0] > 1600 else "inverse")
         m9.metric("Emotional Range", f"{data['emotional_range'][0]:.1f}",
                     delta="Expressive" if data['emotional_range'][0] > 1000000 else "Flat", delta_color="normal" if data['emotional_range'][0] > 1000000 else "inverse")
 
@@ -334,8 +346,8 @@ with tab2:
 
         # 2. Patient Data
         # Dynamic Color Selection (Muted/Soft)
-        fill_color = 'rgba(229, 142, 142, 0.5)' if "Decline" in label else 'rgba(114, 204, 255, 0.5)'
-        line_color = '#E58E8E' if "Decline" in label else '#72CC96'
+        fill_color = 'rgba(229, 142, 142, 0.5)' if label != "Healthy" else 'rgba(114, 204, 255, 0.5)'
+        line_color = '#E58E8E' if label != "Healthy" else '#72CC96'
         
         fig.add_trace(go.Scatterpolar(
             r=r_vals, 
@@ -413,21 +425,21 @@ with tab3:
 
         # Graph 1: Pause Rate Trajectory
         fig_pause = px.line(h_df, x='timestamp', y='pause_rate', markers=True, title="Pause Rate Trajectory", **color_kwarg)
-        fig_pause.add_hline(y=0.40, line_dash="dash", line_color="red", annotation_text="Risk Threshold (>0.4 = Risk)")
+        fig_pause.add_hline(y=0.35, line_dash="dash", line_color="red", annotation_text="Risk Threshold (>0.35 = Risk)")
         if not has_mixed_language:
             fig_pause.update_traces(line_color='#E58E8E')
         st.plotly_chart(fig_pause, use_container_width=True)
 
         # Graph 2: Word Count Trajectory
         fig_words = px.line(h_df, x='timestamp', y='word_count', markers=True, title="Word Count Trajectory", **color_kwarg)
-        fig_words.add_hline(y=20, line_dash="dash", line_color="white", annotation_text="Minimum Threshold (>20 = Good)")
+        fig_words.add_hline(y=80, line_dash="dash", line_color="white", annotation_text="Minimum Threshold (>80 = Good)")
         if not has_mixed_language:
             fig_words.update_traces(line_color='#72CC96')
         st.plotly_chart(fig_words, use_container_width=True)
 
         # Graph 3: Speech Rate Trajectory
         fig_rate = px.line(h_df, x='timestamp', y='speech_rate', markers=True, title="Speech Rate Trajectory", **color_kwarg)
-        fig_rate.add_hline(y=2.0, line_dash="dash", line_color="orange", annotation_text="Minimum Threshold (>2.0 = Good)")
+        fig_rate.add_hline(y=1.9, line_dash="dash", line_color="orange", annotation_text="Minimum Threshold (>1.9 = Good)")
         if not has_mixed_language:
             fig_rate.update_traces(line_color='#72CCFF')
         st.plotly_chart(fig_rate, use_container_width=True)
@@ -436,4 +448,4 @@ with tab3:
         st.warning("No historical records found.")
 
 st.markdown("---")
-st.caption(f"🔒 NeuroSentinel Edge AI | System-Wide Accuracy: {current_accuracy}%")
+st.caption("🔒 NeuroSentinel Edge AI | Research-grade screening aid, not a diagnostic tool")

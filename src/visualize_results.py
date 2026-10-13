@@ -1,43 +1,45 @@
 import pandas as pd
 import pickle
+import json
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from imblearn.over_sampling import SMOTE
 
 # --- CONFIG ---
 DATA_PATH = "data/dataset.csv"
 MODEL_PATH = "models/neuro_model.pkl"
+METRICS_PATH = "models/metrics.json"
 
 # 1. Load Data and Model
 df = pd.read_csv(DATA_PATH)
 with open(MODEL_PATH, 'rb') as f:
     model = pickle.load(f)
+with open(METRICS_PATH, 'r') as f:
+    metrics = json.load(f)
 
 X = df.drop(['label', 'filename'], axis=1)
-y = df['label']
+y = (df['label'] == 2).astype(int)  # 0=Healthy (incl. MCI), 1=Dementia - see train_model.py
 
-# 2. Replicate the Training Split (to get the test set)
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-smote = SMOTE(random_state=42, k_neighbors=1)
-X_res, y_res = smote.fit_resample(X_scaled, y)
-_, X_test, _, y_test = train_test_split(X_res, y_res, test_size=0.2, random_state=42)
+# 2. Use the saved confusion matrix counts directly - train_model.py computes
+# these from out-of-fold cross-validated probabilities at the decision
+# threshold actually used in production, which is far more honest than
+# re-splitting here and scoring a freshly refit model on one lucky/unlucky split.
+full_metrics = metrics["full_model"]
+cm = [[full_metrics["true_negatives"], full_metrics["false_positives"]],
+      [full_metrics["false_negatives"], full_metrics["true_positives"]]]
+labels = ["Healthy", "Dementia"]
 
-# 3. Generate Predictions
-y_pred = model.predict(X_test)
-labels = ["Healthy", "Mild", "Moderate", "Severe"]
-cm = confusion_matrix(y_test, y_pred)
-
-# 4. Plot the Heatmap
-plt.figure(figsize=(10, 7))
+# 3. Plot the Heatmap
+plt.figure(figsize=(8, 6))
 sns.set_theme(style="whitegrid")
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
             xticklabels=labels, yticklabels=labels)
 
-plt.title("Alzheimer's Diagnostic Accuracy: 83.33%", fontsize=16, pad=20)
+plt.title(
+    f"Sensitivity: {full_metrics['sensitivity']*100:.0f}% | Specificity: {full_metrics['specificity']*100:.0f}% "
+    f"(threshold={metrics['dementia_probability_threshold']})",
+    fontsize=14, pad=20
+)
 plt.xlabel("AI Prediction", fontsize=12)
 plt.ylabel("Actual Clinical Diagnosis", fontsize=12)
 plt.savefig("models/confusion_matrix.png")

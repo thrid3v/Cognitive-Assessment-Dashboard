@@ -7,9 +7,17 @@ import librosa
 from vosk import Model, KaldiRecognizer
 
 # --- CONFIGURATION ---
-MODEL_PATH = "models/vosk-model-small-en-us-0.15" 
-DATA_DIR = "data"
+# Source data lives outside the repo (it's a third-party research corpus,
+# not ours to redistribute) - point these at wherever you've placed it.
+# CSV must have columns: Record-ID, Class (values: HC / MCI / Dementia).
+# Audio layout expected: <EXTERNAL_AUDIO_ROOT>/<Record-ID>/<Record-ID>__CTD.wav
+EXTERNAL_CSV_PATH = r"C:\Users\thrid\Downloads\Data_AUG_13.11.2024_output.csv"
+EXTERNAL_AUDIO_ROOT = r"C:\Users\thrid\Desktop\congnitive_decline_dataset\Archive"
+
+MODEL_PATH = "models/vosk-model-small-en-us-0.15"
 OUTPUT_CSV = "data/dataset.csv"
+
+LABELS_MAP = {"HC": 0, "MCI": 1, "Dementia": 2}
 
 # --- 1. LOAD MODEL ---
 if not os.path.exists(MODEL_PATH):
@@ -24,19 +32,19 @@ def analyze_audio(file_path):
         # PART A: ACOUSTIC & PROSODIC ANALYSIS
         y, sr = librosa.load(file_path, sr=16000)
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-        mfcc_mean = np.mean(mfcc[0])
+        mfcc_mean = np.mean(mfcc)  # Mean across all 13 coefficients - must match predictor.py
         mfcc_delta = np.mean(librosa.feature.delta(mfcc))
         spec_centroid = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))
         pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
         pitch_values = pitches[pitches > 0]
         emotional_range = np.var(pitch_values) if len(pitch_values) > 0 else 0
-        
+
         # PART B: LINGUISTIC TIMING
         wf = wave.open(file_path, "rb")
         if wf.getnchannels() != 1 or wf.getsampwidth() != 2:
             wf.close()
             return None
-            
+
         rec = KaldiRecognizer(model, wf.getframerate())
         rec.SetWords(True)
         results = []
@@ -46,25 +54,25 @@ def analyze_audio(file_path):
             if rec.AcceptWaveform(data):
                 part = json.loads(rec.Result())
                 if 'result' in part: results.extend(part['result'])
-        
+
         final_part = json.loads(rec.FinalResult())
         if 'result' in final_part: results.extend(final_part['result'])
         wf.close()
-        
+
         if not results: return None
 
         # FEATURE EXTRACTION
         initial_latency = results[0]['start']
         total_duration = results[-1]['end'] - results[0]['start']
-        pause_time = sum([results[i+1]['start'] - results[i]['end'] 
-                         for i in range(len(results) - 1) 
+        pause_time = sum([results[i+1]['start'] - results[i]['end']
+                         for i in range(len(results) - 1)
                          if (results[i+1]['start'] - results[i]['end']) > 0.25])
-        
+
         pause_rate = pause_time / total_duration if total_duration > 0 else 0
         words = [w['word'] for w in results]
         ttr = len(set(words)) / len(words) if words else 0
         speech_rate = len(words) / results[-1]['end'] if results[-1]['end'] > 0 else 0
-        
+
         return {
             "pause_rate": round(pause_rate, 3),
             "vocab_richness": round(ttr, 3),
@@ -80,41 +88,48 @@ def analyze_audio(file_path):
         return None
 
 # --- 2. PROCESSING LOOP WITH TRACKING ---
+if not os.path.exists(EXTERNAL_CSV_PATH):
+    print(f"❌ CRITICAL ERROR: Source CSV not found at {EXTERNAL_CSV_PATH}")
+    exit(1)
+
+labels_df = pd.read_csv(EXTERNAL_CSV_PATH)
+
 data_records = []
-labels_map = {"healthy": 0, "mild": 1, "moderate": 2, "severe": 3}
-scan_stats = {label: 0 for label in labels_map.keys()} 
+scan_stats = {label: 0 for label in LABELS_MAP.keys()}
 
-print(f"\n📂 Scanning '{DATA_DIR}' for audio files...")
+print(f"\n📂 Scanning '{EXTERNAL_AUDIO_ROOT}' for CTD audio files (per {EXTERNAL_CSV_PATH})...")
 
-for folder_name, label_code in labels_map.items():
-    folder_path = os.path.join(DATA_DIR, folder_name)
-    if not os.path.exists(folder_path):
-        print(f"⚠️  Skipping missing folder: {folder_name}")
+for _, row in labels_df.iterrows():
+    record_id = row['Record-ID']
+    class_name = row['Class']
+
+    if class_name not in LABELS_MAP:
+        print(f"⚠️  Skipping {record_id}: unknown class '{class_name}'.")
         continue
-        
-    files = [f for f in os.listdir(folder_path) if f.lower().endswith('.wav')]
-    print(f"📁 Processing '{folder_name}' ({len(files)} files found)...")
-    
-    for filename in files:
-        file_path = os.path.join(folder_path, filename)
-        features = analyze_audio(file_path)
-        if features:
-            features['label'] = label_code
-            features['filename'] = filename
-            data_records.append(features)
-            scan_stats[folder_name] += 1
-            print(f"   ✅ {filename} processed.")
-        else:
-            print(f"   ❌ {filename} FAILED (Check Mono/16kHz format).")
+
+    file_path = os.path.join(EXTERNAL_AUDIO_ROOT, record_id, f"{record_id}__CTD.wav")
+    if not os.path.exists(file_path):
+        print(f"⚠️  Skipping {record_id}: CTD audio not found.")
+        continue
+
+    features = analyze_audio(file_path)
+    if features:
+        features['label'] = LABELS_MAP[class_name]
+        features['filename'] = f"{record_id}__CTD.wav"
+        data_records.append(features)
+        scan_stats[class_name] += 1
+        print(f"   ✅ {record_id} processed ({class_name}).")
+    else:
+        print(f"   ❌ {record_id} FAILED (no speech detected or bad audio format).")
 
 # --- 3. FINAL SUMMARY TABLE ---
 print("\n" + "="*40)
 print(f"{'CATEGORY':<15} | {'FILES PROCESSED':<15}")
 print("-" * 40)
 for label, count in scan_stats.items():
-    print(f"{label.capitalize():<15} | {count:<15}")
+    print(f"{label:<15} | {count:<15}")
 print("-" * 40)
-print(f"{'TOTAL':<15} | {len(data_records):<15} / 19 Expected")
+print(f"{'TOTAL':<15} | {len(data_records):<15} / {len(labels_df)} Expected")
 print("="*40 + "\n")
 
 if data_records:
@@ -122,4 +137,4 @@ if data_records:
     df.to_csv(OUTPUT_CSV, index=False)
     print(f"🚀 SUCCESS! Dataset saved with all available parameters.")
 else:
-    print("🛑 ERROR: No data extracted. Ensure files are in the data/ subfolders.")
+    print("🛑 ERROR: No data extracted. Check EXTERNAL_CSV_PATH / EXTERNAL_AUDIO_ROOT.")

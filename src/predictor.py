@@ -18,14 +18,26 @@ VOSK_EN_PATH = os.path.join(ROOT_DIR, "models", "vosk-model-small-en-us-0.15")
 VOSK_HI_PATH = os.path.join(ROOT_DIR, "models", "vosk-model-small-hi-0.22")
 MODEL_PATH = os.path.join(ROOT_DIR, "models", "neuro_model.pkl")
 SCALER_PATH = os.path.join(ROOT_DIR, "models", "scaler.pkl")
-DATASET_PATH = os.path.join(ROOT_DIR, "data", "dataset.csv")
-HINDI_CALIBRATION_PATH = os.path.join(ROOT_DIR, "models", "hindi_calibration.json")
+METRICS_PATH = os.path.join(ROOT_DIR, "models", "metrics.json")
 
-# The 5 biomarkers derived from ASR word timestamps (language-dependent).
-# The other 4 (acoustic_texture, mfcc_delta, speech_brightness, emotional_range)
-# come straight from Librosa on the raw waveform and are language-independent,
-# so they're never touched by Hindi calibration.
-LINGUISTIC_FEATURES = ["pause_rate", "vocab_richness", "word_count", "speech_rate", "initial_latency"]
+# Acoustic-only model (4 waveform-derived features), used for Hindi/
+# cross-lingual scoring instead of the full 9-feature model - see
+# train_model.py for why the 5 ASR-derived features aren't used cross-lingually.
+ACOUSTIC_MODEL_PATH = os.path.join(ROOT_DIR, "models", "neuro_model_acoustic.pkl")
+ACOUSTIC_SCALER_PATH = os.path.join(ROOT_DIR, "models", "scaler_acoustic.pkl")
+ACOUSTIC_FEATURES = ["acoustic_texture", "mfcc_delta", "speech_brightness", "emotional_range"]
+
+# Exact column order the full model was trained on. extract_features_from_audio
+# also returns diagnostic-only columns (duration_s, rms) for the recording-
+# quality check below - this list is how we slice back down to just what the
+# model/scaler expect before scoring, regardless of what else is in the frame.
+FULL_FEATURES = [
+    "pause_rate", "vocab_richness", "word_count", "initial_latency",
+    "acoustic_texture", "speech_brightness", "mfcc_delta",
+    "emotional_range", "speech_rate",
+]
+
+DEFAULT_DEMENTIA_THRESHOLD = 0.40
 
 # --- 1. LOAD MODELS ---
 print(f"🔎 Looking for models in: {os.path.join(ROOT_DIR, 'models')}")
@@ -71,21 +83,8 @@ def is_hindi_available():
     return vosk_model_hi is not None
 
 
-def _load_hindi_calibration():
-    if not os.path.exists(HINDI_CALIBRATION_PATH):
-        print(f"ℹ️ No Hindi calibration found at {HINDI_CALIBRATION_PATH} — using raw cross-lingual transfer.")
-        return {}
-    try:
-        with open(HINDI_CALIBRATION_PATH, 'r') as f:
-            offsets = json.load(f)
-        print(f"✅ Hindi calibration loaded: {offsets}")
-        return offsets
-    except Exception as e:
-        print(f"⚠️ Hindi calibration load error: {e} — falling back to raw cross-lingual transfer.")
-        return {}
-
-
-hindi_calibration = _load_hindi_calibration()
+acoustic_clf = None
+acoustic_scaler = None
 
 # Load Classifier & Scaler
 try:
@@ -100,8 +99,32 @@ try:
         with open(SCALER_PATH, 'rb') as f:
             scaler = pickle.load(f)
             print("✅ Scaler Loaded!")
+
+    if os.path.exists(ACOUSTIC_MODEL_PATH):
+        with open(ACOUSTIC_MODEL_PATH, 'rb') as f:
+            acoustic_clf = pickle.load(f)
+            print("✅ Acoustic-only Classifier Loaded!")
+    else:
+        print(f"⚠️ Acoustic-only classifier not found at {ACOUSTIC_MODEL_PATH} — Hindi mode will fall back to the full model.")
+
+    if os.path.exists(ACOUSTIC_SCALER_PATH):
+        with open(ACOUSTIC_SCALER_PATH, 'rb') as f:
+            acoustic_scaler = pickle.load(f)
+            print("✅ Acoustic-only Scaler Loaded!")
 except Exception as e:
     print(f"⚠️ Model/Scaler Load Error: {e}")
+
+# The probability threshold above which a result is reported as "Dementia" -
+# below it, the result is "Healthy" (there is no third "MCI"/"mild" label).
+# Loaded from the value train_model.py actually used, so the app can't drift
+# out of sync with what was validated.
+DEMENTIA_THRESHOLD = DEFAULT_DEMENTIA_THRESHOLD
+if os.path.exists(METRICS_PATH):
+    try:
+        with open(METRICS_PATH, 'r') as f:
+            DEMENTIA_THRESHOLD = json.load(f).get("dementia_probability_threshold", DEFAULT_DEMENTIA_THRESHOLD)
+    except Exception:
+        pass
 
 
 def generate_clinical_summary(features_df):
@@ -116,9 +139,9 @@ def generate_clinical_summary(features_df):
         
         observations = []
         # Using supportive, clinical language
-        if p_rate > 0.4:
+        if p_rate > 0.35:
             observations.append("Observed slight hesitations in natural speech rhythm.")
-        if s_rate < 1.8 and s_rate > 0:
+        if s_rate < 1.9 and s_rate > 0:
             observations.append("Speech tempo is currently below the standardized baseline.")
             
         if not observations:
@@ -133,7 +156,9 @@ def extract_features_from_audio(file_path, language="en"):
     try:
         # 1. ACOUSTIC ANALYSIS (Librosa)
         y, sr = librosa.load(file_path, sr=16000)
-        
+        duration_s = len(y) / sr
+        rms_db = float(librosa.amplitude_to_db(np.array([np.sqrt(np.mean(y**2)) + 1e-9]))[0])
+
         # MFCCs
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
         mfcc_mean = np.mean(mfcc) # Global mean
@@ -192,7 +217,9 @@ def extract_features_from_audio(file_path, language="en"):
         ttr = len(set(words)) / len(words) if words else 0
         speech_rate = len(words) / total_duration if total_duration > 0 else 0
         
-        # RETURN DATAFRAME (Must match model columns exactly)
+        # RETURN DATAFRAME - the 9 model features, plus duration_s/rms_db which
+        # are diagnostic-only (recording-quality notes, not fed to any model;
+        # callers slice down to FULL_FEATURES/ACOUSTIC_FEATURES before scoring)
         return pd.DataFrame([{
             "pause_rate": round(pause_rate, 3),
             "vocab_richness": round(ttr, 3),
@@ -202,96 +229,124 @@ def extract_features_from_audio(file_path, language="en"):
             "speech_brightness": round(spec_centroid, 3),
             "mfcc_delta": round(mfcc_delta, 4),
             "emotional_range": round(emotional_range, 3),
-            "speech_rate": round(speech_rate, 3)
+            "speech_rate": round(speech_rate, 3),
+            "duration_s": round(duration_s, 2),
+            "rms_db": round(rms_db, 2),
         }])
 
     except Exception as e:
         print(f"❌ Feature Extraction Error: {e}")
         return None
 
-def apply_hindi_calibration(features_df):
-    """Shifts the 5 ASR-derived features by the English-vs-Hindi healthy-baseline
-    offset (see calibrate_hindi.py). No-op until that calibration file exists,
-    which means Hindi runs in raw cross-lingual-transfer mode until then."""
-    if not hindi_calibration:
-        return features_df
-    calibrated = features_df.copy()
-    for feature in LINGUISTIC_FEATURES:
-        if feature not in calibrated.columns or feature not in hindi_calibration:
-            continue
-        new_val = max(0.0, calibrated.at[0, feature] + hindi_calibration[feature])
-        if feature == "word_count":
-            new_val = round(new_val)
-        calibrated.at[0, feature] = new_val
-    return calibrated
+def assess_recording_quality(features_df, result_label):
+    """Short, friendly notes about the recording itself - not a diagnostic
+    claim. Point of this: a short/quiet/unusually-fast-or-slow recording can
+    push biomarkers around for reasons that have nothing to do with
+    cognition, so when the result isn't a confident Dementia flag, surface
+    that possibility instead of silently treating a noisy reading as fact.
+    Thresholds are set against the real English dataset's own recordings
+    (typically 100s+, -22 to -28 dB) - see data/dataset.csv.
+    """
+    notes = []
+    row = features_df.iloc[0]
+    duration_s = row.get('duration_s')
+    rms_db = row.get('rms_db')
+
+    if duration_s is not None and duration_s < 15:
+        notes.append("Recording was quite short - try speaking for 30-60 seconds next time for a more reliable result.")
+    if row.get('word_count', 0) < 20:
+        notes.append("Very few words were detected - try speaking a bit more.")
+    if rms_db is not None and rms_db < -40:
+        notes.append("Audio volume seemed low - try speaking closer to the microphone or in a quieter space.")
+
+    # These two are about softening borderline-but-not-strongly-flagged
+    # results, not about the recording per se - only shown when the result
+    # itself is Healthy (i.e. the model wasn't confident enough to call it
+    # Dementia), so it never looks like we're excusing an actual flag.
+    if result_label == "Healthy":
+        if row.get('speech_rate', 99) < 1.3:
+            notes.append("Your speaking pace was slower than typical for this analysis - if that's not how you normally speak, try recording again at a natural pace.")
+        if row.get('pause_rate', 0) > 0.5:
+            notes.append("Longer pauses than typical were detected - background noise or thinking time can both cause this; try a quiet space if possible.")
+
+    return notes
 
 
 def get_prediction(audio_path, language="en"):
-    """ Returns: (Label, Confidence, Features) """
+    """ Returns: (Label, Confidence, Features, Notes) """
     if clf is None:
-        return "Model Error", 0.0, None
+        return "Model Error", 0.0, None, []
 
     features_df = extract_features_from_audio(audio_path, language=language)
 
     if features_df is None:
-        return "Processing Error", 0.0, None
+        return "Processing Error", 0.0, None, []
 
-    if language == "hi":
-        features_df = apply_hindi_calibration(features_df)
+    # Hindi recordings are scored by the acoustic-only model (4 waveform
+    # biomarkers, no ASR involved) instead of the full 9-feature model. The
+    # 5 ASR-derived features depend on language-specific transcription and
+    # there's no sound way to calibrate them cross-lingually with the Hindi
+    # reference data available (see train_model.py) - using the acoustic-only
+    # model sidesteps that rather than silently feeding in miscalibrated
+    # values. The full 9-biomarker panel is still shown in the UI for
+    # information, it just isn't what the Hindi classification decision uses.
+    use_acoustic_only = (language == "hi" and acoustic_clf is not None)
+
+    if use_acoustic_only:
+        active_clf = acoustic_clf
+        features_for_model = features_df[ACOUSTIC_FEATURES]
+        active_scaler = acoustic_scaler
+    else:
+        active_clf = clf
+        features_for_model = features_df[FULL_FEATURES]
+        active_scaler = scaler
 
     # Scale features if scaler exists
-    features_final = features_df
-    if scaler is not None:
+    features_final = features_for_model
+    if active_scaler is not None:
         try:
-            features_final = scaler.transform(features_df)
+            features_final = active_scaler.transform(features_for_model)
         except Exception as e:
             print(f"Scaling warning: {e}")
 
     try:
-        # Get Probabilities
-        probabilities = clf.predict_proba(features_final)[0]
-        confidence = float(np.max(probabilities))
-        
-        # Get Class
-        prediction_class = clf.predict(features_final)[0]
-        
-        labels = {0: "Healthy", 1: "Mild Decline", 2: "Moderate Decline", 3: "Severe Decline"}
-        result_text = labels.get(prediction_class, "Unknown")
-        
-        return result_text, confidence, features_df
-    
+        # Only two output labels, ever: Healthy or Dementia. "Dementia" fires
+        # only when P(Dementia) clears DEMENTIA_THRESHOLD, not just whichever
+        # class is more likely - deliberately conservative (see README) so
+        # ordinary conversational pauses/hesitation don't get flagged as
+        # decline. Below the threshold is reported as Healthy, period - there
+        # is no intermediate "MCI"/"mild" label.
+        dementia_probability = float(active_clf.predict_proba(features_final)[0][1])
+        if dementia_probability >= DEMENTIA_THRESHOLD:
+            result_text = "Dementia"
+            confidence = dementia_probability
+        else:
+            result_text = "Healthy"
+            confidence = 1.0 - dementia_probability
+
+        notes = assess_recording_quality(features_df, result_text)
+
+        return result_text, confidence, features_df, notes
+
     except Exception as e:
         print(f"Prediction logic error: {e}")
-        return "Error", 0.0, features_df
+        return "Error", 0.0, features_df, []
 
 
-def calculate_current_accuracy():
-    """Calculates accuracy against local dataset if available."""
+def get_model_metrics():
+    """Returns the honest, held-out performance metrics saved by train_model.py.
+
+    Deliberately does NOT re-score the model against data/dataset.csv - that
+    was the old approach (calculate_current_accuracy), and since that CSV is
+    the same data the model was trained on, it reported near-training accuracy
+    (~91%) next to a true held-out accuracy of ~56%. Always read the metrics
+    file that was computed on data the model never saw during fitting.
+    """
+    if not os.path.exists(METRICS_PATH):
+        return None
     try:
-        if not os.path.exists(DATASET_PATH) or clf is None:
-            return 0.0
-            
-        # Load dataset
-        df = pd.read_csv(DATASET_PATH)
-        
-        # Check if dataset has required columns
-        required_cols = ['label'] # Add feature columns check if needed
-        if not all(col in df.columns for col in required_cols):
-            return 0.0
-
-        X = df.drop(['label', 'filename'], axis=1, errors='ignore')
-        y = df['label']
-        
-        # Scale
-        if scaler:
-            X = scaler.transform(X)
-        
-        # Predict
-        from sklearn.metrics import accuracy_score
-        y_pred = clf.predict(X)
-        acc = accuracy_score(y, y_pred)
-        
-        return round(acc * 100, 2)
+        with open(METRICS_PATH, 'r') as f:
+            return json.load(f)
     except Exception as e:
-        print(f"Accuracy calc error: {e}")
-        return 0.0
+        print(f"Metrics load error: {e}")
+        return None
